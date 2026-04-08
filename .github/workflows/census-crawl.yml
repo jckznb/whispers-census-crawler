@@ -1,0 +1,38 @@
+name: General Population Crawl (Daily)
+
+# Runs a daily incremental batch of the general population census.
+# Each run processes a chunk of guilds from the queue — coverage improves
+# over time as the snowball grows from M+/PvP character seeds.
+#
+# DISABLED: schedule is commented out until census.py is implemented.
+# Enable by uncommenting the schedule trigger below.
+
+on:
+  # schedule:
+  #   - cron: '0 6 * * *'   # Daily at 06:00 UTC (off-peak for Blizzard API)
+  workflow_dispatch:
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run census batch → export blob
+        env:
+          BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+        run: python -m scripts.run_crawl --phase census --region us
