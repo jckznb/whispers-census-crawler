@@ -45,7 +45,7 @@ def main() -> None:
             compute_pvp_snapshots(region=args.region, snapshot_date=snapshot_date)
         if not args.no_export:
             from crawler.exporter import export_demographics
-            export_demographics(snapshot_date=snapshot_date)
+            export_demographics(snapshot_date=snapshot_date, region=args.region)
 
     elif args.phase == 'mplus':
         from crawler.mythic_plus import crawl_mythic_plus
@@ -55,7 +55,7 @@ def main() -> None:
             compute_mplus_snapshots(region=args.region, snapshot_date=snapshot_date)
         if not args.no_export:
             from crawler.exporter import export_demographics
-            export_demographics(snapshot_date=snapshot_date)
+            export_demographics(snapshot_date=snapshot_date, region=args.region)
 
     elif args.phase == 'raid':
         from crawler.raid import crawl_raid

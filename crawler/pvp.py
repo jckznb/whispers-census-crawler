@@ -86,7 +86,7 @@ def crawl_pvp(region: str = 'us', snapshot_date: date = None) -> None:
 
     unique_chars = list(seen.values())
     logger.info(f'Resolving {len(unique_chars)} unique characters')
-    char_id_map = resolve_characters(unique_chars)
+    char_id_map, fresh_keys = resolve_characters(unique_chars)
 
     # Build PvP entry rows — deduplicate on (character_id, bracket), keeping highest rating
     pvp_dedup: dict[tuple, dict] = {}
@@ -111,3 +111,7 @@ def crawl_pvp(region: str = 'us', snapshot_date: date = None) -> None:
     pvp_rows = list(pvp_dedup.values())
     db.upsert('pvp_entries', pvp_rows, on_conflict='character_id,season_id,bracket,snapshot_date')
     logger.info(f'Stored {len(pvp_rows)} PvP entries for snapshot={snapshot_date}')
+
+    # Fetch professions for characters that were freshly pulled from the API
+    from .professions import resolve_professions
+    resolve_professions(char_id_map, fresh_keys, snapshot_date)

@@ -300,10 +300,14 @@ def crawl_mythic_plus(region: str = 'us', snapshot_date: date = None) -> None:
 
     logger.info(f'Resolving {len(all_chars)} unique characters (profile lookups for unknowns)...')
     from .characters import resolve_characters
-    char_id_map = resolve_characters(all_chars)
+    char_id_map, fresh_keys = resolve_characters(all_chars)
 
     # 6. Persist
     logger.info('Storing runs and members...')
     _store_runs(all_runs, char_id_map, snapshot_date)
+
+    # 7. Fetch professions for characters freshly pulled from the API
+    from .professions import resolve_professions
+    resolve_professions(char_id_map, fresh_keys, snapshot_date)
 
     logger.info('M+ crawl complete')

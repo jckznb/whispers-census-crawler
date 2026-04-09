@@ -12,10 +12,12 @@ logger = logging.getLogger(__name__)
 _CONCURRENCY = 50  # concurrent Blizzard API requests
 
 
-def resolve_characters(chars: list[dict]) -> dict[tuple, int]:
+def resolve_characters(chars: list[dict]) -> tuple[dict[tuple, int], set[tuple]]:
     """
-    Given a list of {name, realm_slug, region} dicts, return a mapping of
-    (name, realm_slug, region) -> character DB id.
+    Given a list of {name, realm_slug, region} dicts, return:
+      - id_map:     (name, realm_slug, region) -> character DB id
+      - fresh_keys: subset of id_map keys that were actually fetched from
+                    the Blizzard API this run (not returned from 24h cache)
 
     Characters updated within STALENESS_HOURS are returned from the DB cache.
     Others are fetched from the Blizzard API concurrently and upserted.
@@ -32,7 +34,7 @@ def resolve_characters(chars: list[dict]) -> dict[tuple, int]:
         for r in existing_rows
     }
 
-    fresh: dict[tuple, int] = {}
+    id_map: dict[tuple, int] = {}
     to_fetch: list[dict] = []
 
     for char in chars:
@@ -41,14 +43,14 @@ def resolve_characters(chars: list[dict]) -> dict[tuple, int]:
         if row and row.get('last_api_update'):
             last_update = datetime.fromisoformat(row['last_api_update'].replace('Z', '+00:00'))
             if last_update > stale_threshold:
-                fresh[key] = row['id']
+                id_map[key] = row['id']
                 continue
         to_fetch.append(char)
 
-    logger.info(f'{len(fresh)} characters fresh in DB, need to fetch {len(to_fetch)} profiles')
+    logger.info(f'{len(id_map)} characters fresh in DB, need to fetch {len(to_fetch)} profiles')
 
     if not to_fetch:
-        return fresh
+        return id_map, set()
 
     # Pre-warm the token cache synchronously so async tasks hit the cache
     from .auth import get_token
@@ -58,17 +60,19 @@ def resolve_characters(chars: list[dict]) -> dict[tuple, int]:
     fetched_rows = asyncio.run(_fetch_profiles_async(to_fetch))
     logger.info(f'Fetched {len(fetched_rows)} profiles from API')
 
+    fresh_keys: set[tuple] = set()
     if fetched_rows:
         db.upsert('characters', fetched_rows, on_conflict='name,realm_slug,region')
         # Reload to get generated IDs
         refreshed = db.select('characters', columns='id,name,realm_slug,region')
-        id_map: dict[tuple, int] = {(r['name'], r['realm_slug'], r['region']): r['id'] for r in refreshed}
+        refreshed_map: dict[tuple, int] = {(r['name'], r['realm_slug'], r['region']): r['id'] for r in refreshed}
         for char in to_fetch:
             key = (char['name'], char['realm_slug'], char['region'])
-            if key in id_map:
-                fresh[key] = id_map[key]
+            if key in refreshed_map:
+                id_map[key] = refreshed_map[key]
+                fresh_keys.add(key)
 
-    return fresh
+    return id_map, fresh_keys
 
 
 async def _fetch_profiles_async(chars: list[dict]) -> list[dict]:

@@ -11,7 +11,8 @@ JSON shape:
     "total": 151717,
     "combos":      [{"race","faction","class","count","pct"}, ...],
     "specs":       [{"class","spec","role","count","pct"}, ...],
-    "spec_combos": [{"race","faction","class","spec","count","pct"}, ...]
+    "spec_combos": [{"race","faction","class","spec","count","pct"}, ...],
+    "professions": [{"name","type","count","pct"}, ...]
   },
   "pve": { ... },
   "general": null
@@ -36,6 +37,13 @@ CONTEXT_MAP = {
     'general': 'general',
 }
 
+# Maps blob key → profession RPC function name (None = no professions for that context)
+PROFESSION_RPC_MAP = {
+    'pvp':     'get_pvp_profession_stats',
+    'pve':     'get_mplus_profession_stats',
+    'general': None,
+}
+
 
 def _load_lookups() -> tuple[dict, dict, dict]:
     """Fetch races, classes, and specs from Supabase, return id→data dicts."""
@@ -43,6 +51,34 @@ def _load_lookups() -> tuple[dict, dict, dict]:
     classes = {c['id']: c for c in db.select('classes', columns='id,name')}
     specs   = {s['id']: s for s in db.select('specs',   columns='id,name,class_id,role')}
     return races, classes, specs
+
+
+def _build_professions(rpc_name: str, snapshot_date: date, region: str) -> list[dict]:
+    """
+    Call a profession stats RPC and return a list of
+    {"name", "type", "count", "pct"} dicts, or [] on error / no data.
+    """
+    try:
+        rows = db.rpc(rpc_name, {
+            'p_snapshot_date': snapshot_date.isoformat(),
+            'p_region': region,
+        })
+    except Exception as exc:
+        logger.warning(f'Profession RPC {rpc_name} failed: {exc}')
+        return []
+
+    if not rows:
+        return []
+
+    return [
+        {
+            'name':  r['name'],
+            'type':  r['type'],
+            'count': r['count'],
+            'pct':   float(r['pct']) if r['pct'] is not None else 0.0,
+        }
+        for r in rows
+    ]
 
 
 def _build_all_for_context(
@@ -153,7 +189,7 @@ def _build_all_for_context(
     return result
 
 
-def export_demographics(snapshot_date: date = None) -> str | None:
+def export_demographics(snapshot_date: date = None, region: str = 'us') -> str | None:
     """
     Build and upload the demographics JSON. Returns the blob URL, or None on failure.
     """
@@ -169,18 +205,32 @@ def export_demographics(snapshot_date: date = None) -> str | None:
 
     payload = {'updated': snapshot_date.isoformat()}
     for blob_key, db_context in CONTEXT_MAP.items():
-        payload[blob_key] = _build_all_for_context(db_context, races, classes, specs)
-        ctx_data = payload[blob_key]
+        ctx_data = _build_all_for_context(db_context, races, classes, specs)
+        payload[blob_key] = ctx_data
+
         if ctx_data is None:
             logger.info(f'  {blob_key}: no data')
-        else:
-            n_specs = len(ctx_data.get('specs', []))
-            n_sc    = len(ctx_data.get('spec_combos', []))
-            logger.info(
-                f"  {blob_key}: {ctx_data['total']:,} characters, "
-                f"{len(ctx_data['combos'])} combos, "
-                f"{n_specs} spec rows, {n_sc} spec_combo rows"
-            )
+            continue
+
+        # Attach profession stats if available for this context
+        prof_rpc = PROFESSION_RPC_MAP.get(blob_key)
+        if prof_rpc:
+            professions = _build_professions(prof_rpc, snapshot_date, region)
+            if professions:
+                ctx_data['professions'] = professions
+                logger.info(f'  {blob_key}: {len(professions)} profession rows')
+            else:
+                logger.info(f'  {blob_key}: no profession data yet')
+
+        n_specs = len(ctx_data.get('specs', []))
+        n_sc    = len(ctx_data.get('spec_combos', []))
+        n_prof  = len(ctx_data.get('professions', []))
+        logger.info(
+            f"  {blob_key}: {ctx_data['total']:,} characters, "
+            f"{len(ctx_data['combos'])} combos, "
+            f"{n_specs} spec rows, {n_sc} spec_combo rows, "
+            f"{n_prof} profession rows"
+        )
 
     json_bytes = json.dumps(payload, separators=(',', ':')).encode()
     logger.info(f'Uploading {len(json_bytes):,} bytes to Vercel Blob...')
