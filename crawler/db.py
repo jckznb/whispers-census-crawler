@@ -7,7 +7,8 @@ logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 1000
 _REST_BASE = f'{SUPABASE_URL}/rest/v1'
-_TIMEOUT = 120  # seconds — large batch inserts can be slow
+_TIMEOUT     = 120   # seconds — large batch inserts
+_RPC_TIMEOUT = 660   # seconds — aggregation RPCs can run 5-10 min on full datasets
 
 
 def _headers(prefer: str = 'return=minimal') -> dict:
@@ -87,6 +88,8 @@ def delete(table: str, filters: dict) -> None:
 
 def rpc(function_name: str, params: dict = None) -> any:
     """Call a Postgres function via RPC."""
-    r = httpx.post(f'{_REST_BASE}/rpc/{function_name}', json=params or {}, headers=_headers(), timeout=_TIMEOUT)
+    r = httpx.post(f'{_REST_BASE}/rpc/{function_name}', json=params or {}, headers=_headers(), timeout=_RPC_TIMEOUT)
+    if not r.is_success:
+        logger.error(f'RPC {function_name} failed {r.status_code}: {r.text[:1000]}')
     r.raise_for_status()
     return r.json() if r.content else None
