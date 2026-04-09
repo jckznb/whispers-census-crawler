@@ -20,14 +20,25 @@ def _headers(prefer: str = 'return=minimal') -> dict:
     }
 
 
-def upsert(table: str, rows: list[dict], on_conflict: str = None) -> None:
-    """Upsert rows into a table in batches."""
+def upsert(
+    table: str,
+    rows: list[dict],
+    on_conflict: str = None,
+    conflict_resolution: str = 'merge-duplicates',
+) -> None:
+    """
+    Upsert rows into a table in batches.
+
+    conflict_resolution:
+      'merge-duplicates' (default) — UPDATE all columns on conflict
+      'ignore-duplicates'          — DO NOTHING on conflict (safe for discovery inserts)
+    """
     if not rows:
         return
     params = {}
     if on_conflict:
         params['on_conflict'] = on_conflict
-    headers = _headers('resolution=merge-duplicates,return=minimal')
+    headers = _headers(f'resolution={conflict_resolution},return=minimal')
     for i in range(0, len(rows), _BATCH_SIZE):
         chunk = rows[i:i + _BATCH_SIZE]
         r = httpx.post(f'{_REST_BASE}/{table}', json=chunk, headers=headers, params=params, timeout=_TIMEOUT)
@@ -35,6 +46,40 @@ def upsert(table: str, rows: list[dict], on_conflict: str = None) -> None:
             logger.error(f'Upsert {table} batch {i}–{i+len(chunk)} failed {r.status_code}: {r.text[:500]}')
         r.raise_for_status()
     logger.debug(f'Upserted {len(rows)} rows into {table}')
+
+
+def query(table: str, params: dict) -> list[dict]:
+    """
+    Raw PostgREST query with arbitrary filter params.
+
+    Use this for queries that need non-equality operators (is.null, not.is.null, etc.)
+    or ordering/limiting that db.select() doesn't support.
+
+    Examples:
+        db.query('census_guilds', {
+            'select': 'id,name,realm_slug',
+            'region': 'eq.us',
+            'last_crawled_at': 'is.null',
+            'order': 'crawl_priority.desc',
+            'limit': '200',
+        })
+    """
+    results = []
+    offset = int(params.pop('offset', 0))
+    limit = params.get('limit')
+    page_size = int(limit) if limit else 1000
+
+    while True:
+        page_params = {**params, 'limit': page_size, 'offset': offset}
+        r = httpx.get(f'{_REST_BASE}/{table}', params=page_params, headers=_headers(), timeout=_TIMEOUT)
+        r.raise_for_status()
+        page = r.json()
+        results.extend(page)
+        # If a limit was specified by caller, return exactly that many
+        if limit or len(page) < page_size:
+            break
+        offset += page_size
+    return results
 
 
 def insert(table: str, rows: list[dict]) -> list[dict]:

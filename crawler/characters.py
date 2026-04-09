@@ -105,17 +105,24 @@ async def _fetch_one(
 
     now = datetime.now(timezone.utc).isoformat()
     gender_type = data.get('gender', {}).get('type', 'MALE')
+
+    guild = data.get('guild') or {}
+    guild_name      = guild.get('name')
+    guild_realm_slug = guild.get('realm', {}).get('slug') if guild else None
+
     return {
-        'name': data.get('name', name),
-        'realm_slug': realm_slug,
-        'region': region,
-        'race_id': data.get('race', {}).get('id'),
-        'class_id': data.get('character_class', {}).get('id'),
-        'active_spec_id': data.get('active_spec', {}).get('id'),
-        'gender': 1 if gender_type == 'FEMALE' else 0,
-        'level': data.get('level'),
-        'faction': data.get('faction', {}).get('type', '').lower(),
+        'name':               data.get('name', name),
+        'realm_slug':         realm_slug,
+        'region':             region,
+        'race_id':            data.get('race', {}).get('id'),
+        'class_id':           data.get('character_class', {}).get('id'),
+        'active_spec_id':     data.get('active_spec', {}).get('id'),
+        'gender':             1 if gender_type == 'FEMALE' else 0,
+        'level':              data.get('level'),
+        'faction':            data.get('faction', {}).get('type', '').lower(),
         'equipped_item_level': data.get('equipped_item_level'),
-        'last_api_update': now,
-        'first_seen': now,
+        'guild_name':         guild_name,
+        'guild_realm_slug':   guild_realm_slug,
+        'last_api_update':    now,
+        'first_seen':         now,
     }

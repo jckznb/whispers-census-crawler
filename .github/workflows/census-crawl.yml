@@ -1,21 +1,32 @@
 name: General Population Crawl (Daily)
 
 # Runs a daily incremental batch of the general population census.
-# Each run processes a chunk of guilds from the queue — coverage improves
-# over time as the snowball grows from M+/PvP character seeds.
+# Each run processes 500 guilds from the queue — coverage builds over time
+# as the snowball grows from M+/PvP character seeds.
 #
-# DISABLED: schedule is commented out until census.py is implemented.
-# Enable by uncommenting the schedule trigger below.
+# Typical runtime: ~15-30 min for 500 guilds depending on roster sizes.
+# After crawl: recomputes general demographics snapshot + re-exports blob.
 
 on:
-  # schedule:
-  #   - cron: '0 6 * * *'   # Daily at 06:00 UTC (off-peak for Blizzard API)
+  schedule:
+    - cron: '0 8 * * *'   # Daily at 08:00 UTC (off-peak for Blizzard API)
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Census mode'
+        required: false
+        default: 'roster'
+        type: choice
+        options: [seed, roster, all]
+      batch_size:
+        description: 'Guild batch size'
+        required: false
+        default: '500'
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4.2.2
@@ -28,11 +39,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run census batch → export blob
+      - name: Run census batch → aggregate → export blob
         env:
           BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
           SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
           BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: python -m scripts.run_crawl --phase census --region us
+        run: |
+          python -m scripts.run_crawl \
+            --phase census \
+            --region us \
+            --mode ${{ github.event.inputs.mode || 'roster' }} \
+            --batch-size ${{ github.event.inputs.batch_size || '500' }}

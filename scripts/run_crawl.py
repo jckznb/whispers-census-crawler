@@ -33,6 +33,12 @@ def main() -> None:
                         help='Skip recomputing demographics_snapshot after crawl')
     parser.add_argument('--no-export', action='store_true',
                         help='Skip uploading demographics JSON to Vercel Blob')
+    # Census-specific args
+    parser.add_argument('--mode', default='roster',
+                        choices=['seed', 'roster', 'all'],
+                        help='Census mode: seed (build guild queue), roster (crawl guilds), all (both)')
+    parser.add_argument('--batch-size', type=int, default=200,
+                        help='Number of guilds to crawl per census roster run (default: 200)')
     args = parser.parse_args()
 
     snapshot_date = date.fromisoformat(args.date) if args.date else date.today()
@@ -62,8 +68,18 @@ def main() -> None:
         crawl_raid(region=args.region)
 
     elif args.phase == 'census':
-        from crawler.census import crawl_census
-        crawl_census(region=args.region)
+        from crawler.census import crawl_census, aggregate_general
+        crawl_census(
+            region=args.region,
+            snapshot_date=snapshot_date,
+            mode=args.mode,
+            batch_size=args.batch_size,
+        )
+        if not args.no_aggregate:
+            aggregate_general(region=args.region, snapshot_date=snapshot_date)
+        if not args.no_export:
+            from crawler.exporter import export_demographics
+            export_demographics(snapshot_date=snapshot_date, region=args.region)
 
     logger.info('Crawl complete')
 
