@@ -2,22 +2,63 @@
 Profession crawler module.
 
 Fetches /professions endpoint for characters that were freshly pulled from
-the Blizzard API during this crawl pass. Characters returned from the 24-hour
-DB cache are skipped — their profession data is already current.
+the Blizzard API during this crawl pass, but only if their profession data
+is older than PROFESSION_STALENESS_DAYS. This prevents re-fetching ~150k
+profession endpoints every week — after the first full pass, only genuinely
+new or expired characters are re-fetched.
 
-This is not a discovery mechanism; it piggybacks on characters already
-found via PvP, M+, or other crawl phases.
+Character profile staleness (24h) and profession staleness (7d) are decoupled:
+a character can be re-profiled weekly but only get a profession refresh once a week.
 """
 import asyncio
 import logging
-from datetime import date
+from datetime import date, timedelta
 import httpx
 from . import client as api
 from . import db
+from .config import PROFESSION_STALENESS_DAYS
 
 logger = logging.getLogger(__name__)
 
 _CONCURRENCY = 50  # match character profile concurrency
+
+
+def _filter_to_stale_professions(
+    candidate_ids: set[int],
+    snapshot_date: date,
+) -> set[int]:
+    """
+    Given a set of character IDs, return only those whose profession data
+    is missing or older than PROFESSION_STALENESS_DAYS.
+
+    Queries character_professions in batches (PostgREST `in.()` operator).
+    """
+    cutoff = (snapshot_date - timedelta(days=PROFESSION_STALENESS_DAYS)).isoformat()
+
+    # Pull character_ids that have a recent profession snapshot
+    # PostgREST `in.()` with large lists can be slow — batch if needed
+    all_recent: set[int] = set()
+    ids_list = list(candidate_ids)
+    batch_size = 500  # keep URL length manageable
+
+    for i in range(0, len(ids_list), batch_size):
+        chunk = ids_list[i:i + batch_size]
+        ids_csv = ','.join(str(cid) for cid in chunk)
+        rows = db.query('character_professions', {
+            'select':        'character_id',
+            'character_id':  f'in.({ids_csv})',
+            'snapshot_date': f'gte.{cutoff}',
+        })
+        for r in rows:
+            all_recent.add(r['character_id'])
+
+    stale = candidate_ids - all_recent
+    logger.info(
+        f'Profession staleness check: {len(candidate_ids)} candidates, '
+        f'{len(all_recent)} already fresh (<{PROFESSION_STALENESS_DAYS}d), '
+        f'{len(stale)} need fetch'
+    )
+    return stale
 
 
 def resolve_professions(
@@ -26,10 +67,11 @@ def resolve_professions(
     snapshot_date: date,
 ) -> None:
     """
-    Fetch profession data for characters that were freshly retrieved from
-    the Blizzard API (i.e., keys in fresh_keys, a subset of char_id_map).
+    Fetch profession data for characters that were freshly profile-fetched
+    AND whose profession data is stale (older than PROFESSION_STALENESS_DAYS).
 
-    Writes rows to character_professions.
+    This decouples character-profile staleness (24h) from profession staleness
+    (7d), so a weekly crawl doesn't re-fetch 150k profession endpoints every run.
 
     Args:
         char_id_map:   (name, realm_slug, region) → character DB id
@@ -41,17 +83,29 @@ def resolve_professions(
         logger.info('No fresh characters — skipping profession fetch')
         return
 
-    # Build the list of chars to fetch professions for
-    chars_to_fetch = [
-        {'name': k[0], 'realm_slug': k[1], 'region': k[2], 'character_id': char_id_map[k]}
-        for k in fresh_keys
-        if k in char_id_map
-    ]
+    # Map fresh keys → character IDs
+    candidate_ids: set[int] = {
+        char_id_map[k] for k in fresh_keys if k in char_id_map
+    }
 
-    if not chars_to_fetch:
+    if not candidate_ids:
         return
 
-    logger.info(f'Fetching professions for {len(chars_to_fetch)} fresh characters...')
+    # Filter to only characters whose profession data is actually stale
+    stale_ids = _filter_to_stale_professions(candidate_ids, snapshot_date)
+
+    if not stale_ids:
+        logger.info('All fresh characters already have current profession data — skipping')
+        return
+
+    # Build the fetch list from the stale IDs
+    id_to_key: dict[int, tuple] = {v: k for k, v in char_id_map.items() if v in stale_ids}
+    chars_to_fetch = [
+        {'name': k[0], 'realm_slug': k[1], 'region': k[2], 'character_id': cid}
+        for cid, k in id_to_key.items()
+    ]
+
+    logger.info(f'Fetching professions for {len(chars_to_fetch)} characters...')
 
     # Pre-warm auth token
     from .auth import get_token

@@ -24,3 +24,9 @@ RATE_LIMIT_RPS = 50
 
 # Skip character profile lookups if updated more recently than this
 STALENESS_HOURS = 24
+
+# Skip profession re-fetches for characters that already have a profession
+# snapshot within this many days. Profession choices are stable mid-season,
+# so weekly is fine. This prevents re-fetching ~150k profession endpoints
+# every time the crawler runs (since all characters are always profile-stale).
+PROFESSION_STALENESS_DAYS = 7
