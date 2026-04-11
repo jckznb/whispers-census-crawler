@@ -23,7 +23,7 @@ logging.basicConfig(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Recompute Whispers Census demographic snapshots')
-    parser.add_argument('--phase', required=True, choices=['pvp', 'mplus', 'raid'],
+    parser.add_argument('--phase', required=True, choices=['pvp', 'mplus', 'general'],
                         help='Which context to recompute')
     parser.add_argument('--region', default='us', choices=['us', 'eu'])
     parser.add_argument('--date', default=None,
@@ -35,8 +35,14 @@ def main() -> None:
     if args.phase == 'pvp':
         from crawler.aggregator import compute_pvp_snapshots
         compute_pvp_snapshots(region=args.region, snapshot_date=snapshot_date)
-    else:
-        print(f'Phase {args.phase} aggregation not yet implemented')
+
+    elif args.phase == 'mplus':
+        from crawler.aggregator import compute_mplus_snapshots
+        compute_mplus_snapshots(region=args.region, snapshot_date=snapshot_date)
+
+    elif args.phase == 'general':
+        from crawler.census import aggregate_general
+        aggregate_general(region=args.region, snapshot_date=snapshot_date)
 
 
 if __name__ == '__main__':

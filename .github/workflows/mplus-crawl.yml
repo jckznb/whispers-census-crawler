@@ -3,6 +3,13 @@ name: Mythic+ Crawl (Weekly)
 # Runs every Wednesday at 16:00 UTC — one day after the NA weekly reset,
 # giving the M+ leaderboards time to populate with fresh runs.
 # Also triggerable manually from the Actions tab.
+#
+# Split into two jobs so a crawl timeout doesn't prevent aggregation:
+#   crawl    — leaderboard fetch + character resolution (up to 6h)
+#   finalize — aggregate demographics + export blob (up to 2h, always runs)
+#
+# If crawl times out, finalize still runs and exports whatever data
+# made it into Supabase during the partial crawl.
 
 on:
   schedule:
@@ -11,6 +18,7 @@ on:
 
 jobs:
   crawl:
+    name: Crawl leaderboards + resolve characters
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -25,11 +33,47 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run M+ crawl → aggregate → export blob
+      - name: Run M+ crawl (no aggregate, no export)
         env:
           BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
           SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
           BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: python -m scripts.run_crawl --phase mplus --region us
+        run: |
+          python -m scripts.run_crawl \
+            --phase mplus \
+            --region us \
+            --no-aggregate \
+            --no-export
+
+  finalize:
+    name: Aggregate demographics + export blob
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: crawl
+    if: always()   # run even if crawl was cancelled by timeout
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Aggregate M+ demographics snapshot
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m scripts.aggregate --phase mplus --region us
+
+      - name: Export demographics blob
+        env:
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+        run: python -m scripts.export --region us
