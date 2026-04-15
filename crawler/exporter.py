@@ -44,6 +44,13 @@ PROFESSION_RPC_MAP = {
     'general': None,
 }
 
+# Maps blob key → build RPC function name
+BUILD_RPC_MAP = {
+    'pvp':     'get_pvp_top_builds',
+    'pve':     'get_mplus_top_builds',
+    'general': None,
+}
+
 
 def _load_lookups() -> tuple[dict, dict, dict]:
     """Fetch races, classes, and specs from Supabase, return id→data dicts."""
@@ -51,6 +58,38 @@ def _load_lookups() -> tuple[dict, dict, dict]:
     classes = {c['id']: c for c in db.select('classes', columns='id,name')}
     specs   = {s['id']: s for s in db.select('specs',   columns='id,name,class_id,role')}
     return races, classes, specs
+
+
+def _build_top_builds(rpc_name: str, snapshot_date: date, region: str) -> list[dict]:
+    """
+    Call a top-builds RPC and return rows shaped as:
+    {"spec_id", "spec", "class", "code", "count", "pct"}
+    Grouped by spec in the blob — frontend renders top N per spec.
+    """
+    try:
+        rows = db.rpc(rpc_name, {
+            'p_snapshot_date': snapshot_date.isoformat(),
+            'p_region':        region,
+            'p_limit':         5,
+        })
+    except Exception as exc:
+        logger.warning(f'Build RPC {rpc_name} failed: {exc}')
+        return []
+
+    if not rows:
+        return []
+
+    return [
+        {
+            'spec_id': r['spec_id'],
+            'spec':    r['spec_name'],
+            'class':   r['class_name'],
+            'code':    r['loadout_code'],
+            'count':   r['count'],
+            'pct':     float(r['pct']) if r['pct'] is not None else 0.0,
+        }
+        for r in rows
+    ]
 
 
 def _build_professions(rpc_name: str, snapshot_date: date, region: str) -> list[dict]:
@@ -218,18 +257,23 @@ def export_demographics(snapshot_date: date = None, region: str = 'us') -> str |
             professions = _build_professions(prof_rpc, snapshot_date, region)
             if professions:
                 ctx_data['professions'] = professions
-                logger.info(f'  {blob_key}: {len(professions)} profession rows')
-            else:
-                logger.info(f'  {blob_key}: no profession data yet')
 
-        n_specs = len(ctx_data.get('specs', []))
-        n_sc    = len(ctx_data.get('spec_combos', []))
-        n_prof  = len(ctx_data.get('professions', []))
+        # Attach top builds per spec if available for this context
+        build_rpc = BUILD_RPC_MAP.get(blob_key)
+        if build_rpc:
+            top_builds = _build_top_builds(build_rpc, snapshot_date, region)
+            if top_builds:
+                ctx_data['top_builds'] = top_builds
+
+        n_specs  = len(ctx_data.get('specs', []))
+        n_sc     = len(ctx_data.get('spec_combos', []))
+        n_prof   = len(ctx_data.get('professions', []))
+        n_builds = len(ctx_data.get('top_builds', []))
         logger.info(
             f"  {blob_key}: {ctx_data['total']:,} characters, "
             f"{len(ctx_data['combos'])} combos, "
             f"{n_specs} spec rows, {n_sc} spec_combo rows, "
-            f"{n_prof} profession rows"
+            f"{n_prof} profession rows, {n_builds} build rows"
         )
 
     json_bytes = json.dumps(payload, separators=(',', ':')).encode()

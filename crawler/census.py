@@ -26,10 +26,18 @@ from datetime import date, datetime, timezone, timedelta
 import httpx
 from . import client as api
 from . import db
+from .config import CENSUS_TARGET_REALMS
 
 logger = logging.getLogger(__name__)
 
 _CONCURRENCY = 50
+
+# Flat set of all target realm slugs for quick membership checks
+_TARGET_REALM_SLUGS: set[str] = {
+    slug
+    for slugs in CENSUS_TARGET_REALMS.values()
+    for slug in slugs
+}
 
 # Level at which a character is considered "endgame" and worth counting
 _MIN_LEVEL = 80
@@ -56,23 +64,28 @@ def _guild_slug(name: str) -> str:
 
 def seed_guilds(region: str) -> int:
     """
-    Pull guild references from characters already in the DB (those that have
-    guild_name populated from a profile fetch) and upsert them into census_guilds.
+    Pull guild references from characters on TARGET_REALMS that have
+    guild_name populated (from PvP/M+ profile fetches) and upsert into census_guilds.
 
-    Characters get their guild_name field from the PvP/M+ crawl profile fetches.
-    This function only needs to run once after the first crawl with the new code,
-    but it's idempotent — safe to run any time.
+    Only guilds on realms listed in CENSUS_TARGET_REALMS are queued — this
+    bounds the census to a curated set of representative servers rather than
+    snowballing the entire region.
 
     Returns the number of new guilds inserted.
     """
-    logger.info(f'Seeding census_guilds from characters table (region={region})...')
+    target_slugs = list(_TARGET_REALM_SLUGS)
+    logger.info(
+        f'Seeding census_guilds from {len(target_slugs)} target realms '
+        f'(region={region})...'
+    )
 
-    # Pull distinct (guild_name, guild_realm_slug) pairs for this region
+    # Pull distinct (guild_name, guild_realm_slug) from target realms only
+    slugs_csv = ','.join(target_slugs)
     rows = db.query('characters', {
         'select':             'guild_name,guild_realm_slug',
         'region':             f'eq.{region}',
         'guild_name':         'not.is.null',
-        'guild_realm_slug':   'not.is.null',
+        'guild_realm_slug':   f'in.({slugs_csv})',
     })
 
     if not rows:
@@ -199,6 +212,11 @@ def crawl_guild_batch(
                 'last_api_update':  now,
                 'first_seen':       now,
             })
+
+        if char_rows:
+            # Filter to target realms — the roster may include characters from
+            # connected realms outside our target list; skip those.
+            char_rows = [r for r in char_rows if r['realm_slug'] in _TARGET_REALM_SLUGS]
 
         if char_rows:
             # ignore-duplicates: don't overwrite spec/ilvl data for leaderboard chars

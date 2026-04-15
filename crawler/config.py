@@ -27,6 +27,27 @@ RATE_LIMIT_RPS = 50
 # Skip character profile lookups if updated more recently than this
 STALENESS_HOURS = 24
 
+# Targeted realms for the general population census.
+# Rather than snowballing the entire US region, we sample a curated set of
+# realms representing different server cultures. Guild rosters from these
+# realms give a representative cross-section of the general playerbase.
+#
+# Categories:
+#   high_pop_pve  — largest PvE-dominant servers (Area 52, Stormrage)
+#   pvp_community — servers with historically active PvP scenes (Tichondrius, Illidan, Mal'Ganis)
+#   rp            — roleplay servers (Moon Guard, Wyrmrest Accord)
+#   latin_america — LA servers (Azralon, Ragnaros)
+#   oceanic       — OCE servers (Barthilas, Frostmourne)
+#
+# Slugs must match the Blizzard API realm slug format.
+CENSUS_TARGET_REALMS: dict[str, list[str]] = {
+    'high_pop_pve':  ['area-52', 'stormrage', 'dalaran', 'hyjal'],
+    'pvp_community': ['tichondrius', 'illidan', 'malganis', 'bleeding-hollow'],
+    'rp':            ['moon-guard', 'wyrmrest-accord'],
+    'latin_america': ['azralon', 'ragnaros', 'goldrinn'],
+    'oceanic':       ['barthilas', 'frostmourne'],
+}
+
 # Skip profession re-fetches for characters that already have a profession
 # snapshot within this many days. Profession choices are stable mid-season,
 # so weekly is fine. This prevents re-fetching ~150k profession endpoints

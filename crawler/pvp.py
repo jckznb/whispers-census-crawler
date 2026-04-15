@@ -112,6 +112,8 @@ def crawl_pvp(region: str = 'us', snapshot_date: date = None) -> None:
     db.upsert('pvp_entries', pvp_rows, on_conflict='character_id,season_id,bracket,snapshot_date')
     logger.info(f'Stored {len(pvp_rows)} PvP entries for snapshot={snapshot_date}')
 
-    # Fetch professions for characters that were freshly pulled from the API
+    # Fetch professions + builds for characters freshly pulled from the API
     from .professions import resolve_professions
+    from .builds import resolve_builds
     resolve_professions(char_id_map, fresh_keys, snapshot_date)
+    resolve_builds(char_id_map, fresh_keys, snapshot_date)

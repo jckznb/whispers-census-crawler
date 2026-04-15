@@ -306,8 +306,10 @@ def crawl_mythic_plus(region: str = 'us', snapshot_date: date = None) -> None:
     logger.info('Storing runs and members...')
     _store_runs(all_runs, char_id_map, snapshot_date)
 
-    # 7. Fetch professions for characters freshly pulled from the API
+    # 7. Fetch professions + builds for characters freshly pulled from the API
     from .professions import resolve_professions
+    from .builds import resolve_builds
     resolve_professions(char_id_map, fresh_keys, snapshot_date)
+    resolve_builds(char_id_map, fresh_keys, snapshot_date)
 
     logger.info('M+ crawl complete')
