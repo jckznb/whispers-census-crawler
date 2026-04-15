@@ -3,8 +3,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BLIZZARD_CLIENT_ID = os.environ['BLIZZARD_CLIENT_ID']
-BLIZZARD_CLIENT_SECRET = os.environ['BLIZZARD_CLIENT_SECRET']
+# Optional at import time — only required when making Blizzard API calls.
+# Using .get() so aggregate/export jobs can import config without Blizzard creds.
+BLIZZARD_CLIENT_ID = os.environ.get('BLIZZARD_CLIENT_ID', '')
+BLIZZARD_CLIENT_SECRET = os.environ.get('BLIZZARD_CLIENT_SECRET', '')
 
 SUPABASE_URL = os.environ['SUPABASE_URL']
 SUPABASE_SERVICE_KEY = os.environ['SUPABASE_SERVICE_KEY']
