@@ -11,8 +11,15 @@ logger = logging.getLogger(__name__)
 
 _CONCURRENCY = 50  # concurrent Blizzard API requests
 
+# Max character names per PostgREST IN() query — WoW names ≤12 chars,
+# so 300 names ≈ 3600 chars in the URL param, well within limits.
+_NAME_BATCH = 300
 
-def resolve_characters(chars: list[dict]) -> tuple[dict[tuple, int], set[tuple]]:
+
+def resolve_characters(
+    chars: list[dict],
+    force: bool = False,
+) -> tuple[dict[tuple, int], set[tuple]]:
     """
     Given a list of {name, realm_slug, region} dicts, return:
       - id_map:     (name, realm_slug, region) -> character DB id
@@ -21,14 +28,35 @@ def resolve_characters(chars: list[dict]) -> tuple[dict[tuple, int], set[tuple]]
 
     Characters updated within STALENESS_HOURS are returned from the DB cache.
     Others are fetched from the Blizzard API concurrently and upserted.
+
+    force=True bypasses the staleness check and re-fetches all characters.
+    Used by census spec resolution to profile census-only characters that have
+    never had a Blizzard profile fetch (active_spec_id = NULL).
     """
     if not chars:
-        return {}
+        return {}, set()
 
     stale_threshold = datetime.now(timezone.utc) - timedelta(hours=STALENESS_HOURS)
 
-    # Load all existing characters into a lookup dict
-    existing_rows = db.select('characters', columns='id,name,realm_slug,region,last_api_update')
+    # Load existing characters in targeted name-batched queries instead of
+    # scanning the entire table — critical for scale (the table has 800k+ rows).
+    by_region: dict[str, list[dict]] = {}
+    for c in chars:
+        by_region.setdefault(c['region'], []).append(c)
+
+    existing_rows: list[dict] = []
+    for region, region_chars in by_region.items():
+        unique_names = list({c['name'] for c in region_chars})
+        for i in range(0, len(unique_names), _NAME_BATCH):
+            batch = unique_names[i:i + _NAME_BATCH]
+            names_csv = ','.join(batch)
+            rows = db.query('characters', {
+                'select': 'id,name,realm_slug,region,last_api_update',
+                'name':   f'in.({names_csv})',
+                'region': f'eq.{region}',
+            })
+            existing_rows.extend(rows)
+
     existing: dict[tuple, dict] = {
         (r['name'], r['realm_slug'], r['region']): r
         for r in existing_rows
@@ -40,7 +68,7 @@ def resolve_characters(chars: list[dict]) -> tuple[dict[tuple, int], set[tuple]]
     for char in chars:
         key = (char['name'], char['realm_slug'], char['region'])
         row = existing.get(key)
-        if row and row.get('last_api_update'):
+        if not force and row and row.get('last_api_update'):
             last_update = datetime.fromisoformat(row['last_api_update'].replace('Z', '+00:00'))
             if last_update > stale_threshold:
                 id_map[key] = row['id']
@@ -63,9 +91,28 @@ def resolve_characters(chars: list[dict]) -> tuple[dict[tuple, int], set[tuple]]
     fresh_keys: set[tuple] = set()
     if fetched_rows:
         db.upsert('characters', fetched_rows, on_conflict='name,realm_slug,region')
-        # Reload to get generated IDs
-        refreshed = db.select('characters', columns='id,name,realm_slug,region')
-        refreshed_map: dict[tuple, int] = {(r['name'], r['realm_slug'], r['region']): r['id'] for r in refreshed}
+        # Reload only the characters we just fetched — never scan the whole table.
+        by_region_fetch: dict[str, list[dict]] = {}
+        for c in to_fetch:
+            by_region_fetch.setdefault(c['region'], []).append(c)
+
+        refreshed_rows: list[dict] = []
+        for region, region_chars in by_region_fetch.items():
+            unique_names = list({c['name'] for c in region_chars})
+            for i in range(0, len(unique_names), _NAME_BATCH):
+                batch = unique_names[i:i + _NAME_BATCH]
+                names_csv = ','.join(batch)
+                rows = db.query('characters', {
+                    'select': 'id,name,realm_slug,region',
+                    'name':   f'in.({names_csv})',
+                    'region': f'eq.{region}',
+                })
+                refreshed_rows.extend(rows)
+
+        refreshed_map: dict[tuple, int] = {
+            (r['name'], r['realm_slug'], r['region']): r['id']
+            for r in refreshed_rows
+        }
         for char in to_fetch:
             key = (char['name'], char['realm_slug'], char['region'])
             if key in refreshed_map:
