@@ -24,28 +24,121 @@ BLIZZARD_API_BASE = {
 # Stay safely under 100 req/s Blizzard rate limit
 RATE_LIMIT_RPS = 50
 
-# Skip character profile lookups if updated more recently than this
-STALENESS_HOURS = 24
+# Skip character profile lookups if updated more recently than this.
+# 48h (2 days) ensures M+ crawl (Wednesday) benefits from PvP cache (Tuesday)
+# without requiring a full re-fetch of every character every week.
+STALENESS_HOURS = 48
 
 # Targeted realms for the general population census.
-# Rather than snowballing the entire US region, we sample a curated set of
-# realms representing different server cultures. Guild rosters from these
-# realms give a representative cross-section of the general playerbase.
+# Two clusters chosen for distinct community character:
 #
-# Categories:
-#   high_pop_pve  — largest PvE-dominant servers (Area 52, Stormrage)
-#   pvp_community — servers with historically active PvP scenes (Tichondrius, Illidan, Mal'Ganis)
-#   rp            — roleplay servers (Moon Guard, Wyrmrest Accord)
-#   latin_america — LA servers (Azralon, Ragnaros)
-#   oceanic       — OCE servers (Barthilas, Frostmourne)
+#   rp      — dedicated RP servers; skews toward casual/social playstyle
+#               Moon Guard, Wyrmrest Accord, Emerald Dream
 #
-# Slugs must match the Blizzard API realm slug format.
+#   general — the ten highest-population US realms; broad cross-section
+#               of the active playerbase weighted toward Horde (Area 52,
+#               Illidan, Mal'Ganis dominate US pop rankings)
+#               Illidan, Area 52, Mal'Ganis, Zul'jin, Tichondrius,
+#               Stormrage, Thrall, Ragnaros, Azralon
+#               + one TBD slot (see FIXME below)
+#
+# Slugs must match the Blizzard API realm slug format exactly.
+# Verify unknown slugs via: GET /data/wow/realm/{slug}?namespace=dynamic-us
 CENSUS_TARGET_REALMS: dict[str, list[str]] = {
-    'high_pop_pve':  ['area-52', 'stormrage', 'dalaran', 'hyjal'],
-    'pvp_community': ['tichondrius', 'illidan', 'malganis', 'bleeding-hollow'],
-    'rp':            ['moon-guard', 'wyrmrest-accord'],
-    'latin_america': ['azralon', 'ragnaros', 'goldrinn'],
-    'oceanic':       ['barthilas', 'frostmourne'],
+    'rp': [
+        'moon-guard',
+        'wyrmrest-accord',
+        'emerald-dream',
+    ],
+    'general': [
+        'illidan',
+        'area-52',
+        'malganis',    # Mal'Ganis
+        'zuljin',      # Zul'jin
+        'tichondrius',
+        'stormrage',
+        'sargeras',    # Sargeras
+        'thrall',
+        'ragnaros',    # Latin America
+        'azralon',     # Latin America
+    ],
+}
+
+# Manual guild seeds for realms that are underrepresented in PvP/M+ leaderboards.
+# RP realms in particular have large active populations but few rated players,
+# so the character-based seed produces almost nothing for them.
+#
+# Add well-known large guilds here — the roster crawl will fan out from these
+# into hundreds of additional guilds via the guild_name field on discovered chars.
+#
+# Guild names must match the in-game name exactly (slugification is automatic).
+MANUAL_GUILD_SEEDS: dict[str, list[str]] = {
+    'moon-guard': [
+        'Edict',
+        'vibes',
+        'Power Word Furry',
+        'Ouro',
+        'Heroes for Hire',
+        'Vibe Police',
+        'Rare Art Traders',
+        'whos looting',
+        'Frequent War Crimes',
+        'Knowledge is Power',
+        'The Pit',
+        'Wolves of Emberstorm',
+        'Marvelous Misadventures',
+        'Key Components',
+        'Interwoven',
+        'Renaissance Reborn',
+        'Women of Azeroth',
+        'The Fashion Brigade',
+        'Dark Intentions',
+        'GLOBOFOMO',
+    ],
+    'wyrmrest-accord': [
+        'Life',
+        'With Valor',
+        'Avoidable Damage',
+        'Foxtail Caravan',
+        'Sisu',
+        'Felforged',
+        'Darkwind',
+        'Hand of Algalon',
+        'Ungoon',
+        'Halfway Sane',
+        'Metric',
+        'Tale of Tails',
+        'Requiem',
+        'Carrion',
+        'Puzzle Box',
+        'Mid Knights',
+        'Crann Taca',
+        'Prepot Tylenol',
+        'Uncrowned',
+        'Whisper',
+    ],
+    'emerald-dream': [
+        'Nascent',
+        'Spiral Out',
+        'The Depraved',
+        'Noble House',
+        'Nascent [ Team 8 ]',
+        'Scuffed',
+        'Lucid',
+        'Diversus',
+        'Pluck',
+        'Wicked Claw',
+        'quacks',
+        'Add Violence',
+        'Yes Chef',
+        'Absolute',
+        'Ironsworn Regiment',
+        'Conclave Of Cool',
+        'Wayward Company',
+        'Asgard',
+        'All You Can Eat',
+        'Clickers Anonymous',
+    ],
 }
 
 # Skip profession re-fetches for characters that already have a profession
