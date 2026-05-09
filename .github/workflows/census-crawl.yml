@@ -1,11 +1,14 @@
 name: General Population Crawl (Daily)
 
 # Runs a daily incremental batch of the general population census.
-# Each run processes 500 guilds from the queue — coverage builds over time
-# as the snowball grows from M+/PvP character seeds.
+# Each run:
+#   1. Seeds new guilds from PvP/M+ character data (mode=all)
+#   2. Crawls 500 guild rosters → discovers characters
+#   3. Profiles up to 5k census characters missing active_spec_id
+#   4. Re-aggregates general + RP demographics snapshots
+#   5. Exports blob to Vercel CDN
 #
-# Typical runtime: ~15-30 min for 500 guilds depending on roster sizes.
-# After crawl: recomputes general demographics snapshot + re-exports blob.
+# Typical runtime: ~20-40 min for 500 guilds + spec resolution.
 
 on:
   schedule:
@@ -15,7 +18,7 @@ on:
       mode:
         description: 'Census mode'
         required: false
-        default: 'roster'
+        default: 'all'
         type: choice
         options: [seed, roster, all]
       batch_size:
@@ -50,5 +53,5 @@ jobs:
           python -m scripts.run_crawl \
             --phase census \
             --region us \
-            --mode ${{ github.event.inputs.mode || 'roster' }} \
+            --mode ${{ github.event.inputs.mode || 'all' }} \
             --batch-size ${{ github.event.inputs.batch_size || '500' }}
