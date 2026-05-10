@@ -21,6 +21,32 @@ def _throttle() -> None:
     _last_request_time = time.monotonic()
 
 
+class AsyncRateLimiter:
+    """Token-bucket rate limiter for async contexts.
+
+    Ensures at most `rate` requests per second are started across all
+    concurrent tasks sharing this limiter. The internal lock serializes
+    the throttle check so bursts of tasks space themselves out rather
+    than all firing at once and triggering Blizzard 429s.
+
+    Create one instance per asyncio.run() context and pass it through
+    to every async_get() call.
+    """
+
+    def __init__(self, rate: float = RATE_LIMIT_RPS) -> None:
+        self._min_interval = 1.0 / rate
+        self._lock = asyncio.Lock()
+        self._last: float = 0.0
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = asyncio.get_event_loop().time()
+            wait = self._min_interval - (now - self._last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = asyncio.get_event_loop().time()
+
+
 def get(
     path: str,
     region: str = 'us',
@@ -90,9 +116,14 @@ async def async_get(
     namespace: str = None,
     params: dict = None,
     retries: int = 7,
+    limiter: 'AsyncRateLimiter | None' = None,
 ) -> dict | None:
     """
     Async GET a Blizzard API endpoint. Uses shared AsyncClient for connection pooling.
+
+    Pass an AsyncRateLimiter instance via `limiter` to enforce the global rate
+    limit across all concurrent tasks. Without it, concurrent tasks can flood
+    the Blizzard API and trigger 429 cascades.
 
     Returns parsed JSON on success, None on 404.
     Raises on persistent errors.
@@ -104,6 +135,8 @@ async def async_get(
     all_params['locale'] = 'en_US'
 
     for attempt in range(retries):
+        if limiter:
+            await limiter.acquire()
         token = get_token(region)  # sync, cached — safe to call from async context
         try:
             resp = await client.get(
