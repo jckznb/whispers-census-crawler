@@ -149,11 +149,12 @@ async def _fetch_professions_async(
     Returns list of (character_id, parsed_professions) pairs.
     """
     sem = asyncio.Semaphore(_CONCURRENCY)
+    limiter = api.AsyncRateLimiter()
     async with httpx.AsyncClient(
         limits=httpx.Limits(max_connections=_CONCURRENCY)
     ) as client:
         tasks = [
-            _fetch_one(client, sem, c['character_id'], c['name'], c['realm_slug'], c['region'])
+            _fetch_one(client, sem, limiter, c['character_id'], c['name'], c['realm_slug'], c['region'])
             for c in chars
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -168,6 +169,7 @@ async def _fetch_professions_async(
 async def _fetch_one(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
+    limiter: api.AsyncRateLimiter,
     character_id: int,
     name: str,
     realm_slug: str,
@@ -179,6 +181,7 @@ async def _fetch_one(
             f'/profile/wow/character/{realm_slug}/{name.lower()}/professions',
             region=region,
             namespace=f'profile-{region}',
+            limiter=limiter,
         )
 
     if not data:
