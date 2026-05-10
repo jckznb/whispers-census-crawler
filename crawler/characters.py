@@ -124,8 +124,9 @@ def resolve_characters(
 
 async def _fetch_profiles_async(chars: list[dict]) -> list[dict]:
     sem = asyncio.Semaphore(_CONCURRENCY)
+    limiter = api.AsyncRateLimiter()
     async with httpx.AsyncClient(limits=httpx.Limits(max_connections=_CONCURRENCY)) as client:
-        tasks = [_fetch_one(client, sem, c['name'], c['realm_slug'], c['region']) for c in chars]
+        tasks = [_fetch_one(client, sem, limiter, c['name'], c['realm_slug'], c['region']) for c in chars]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     errors = sum(1 for r in results if isinstance(r, Exception))
     if errors:
@@ -136,6 +137,7 @@ async def _fetch_profiles_async(chars: list[dict]) -> list[dict]:
 async def _fetch_one(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
+    limiter: api.AsyncRateLimiter,
     name: str,
     realm_slug: str,
     region: str,
@@ -146,6 +148,7 @@ async def _fetch_one(
             f'/profile/wow/character/{realm_slug}/{name.lower()}',
             region=region,
             namespace=f'profile-{region}',
+            limiter=limiter,
         )
     if not data:
         return None
