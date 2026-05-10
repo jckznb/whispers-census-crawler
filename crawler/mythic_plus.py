@@ -45,6 +45,7 @@ def get_connected_realm_ids(region: str = 'us') -> list[int]:
 async def _fetch_realm_index(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
+    limiter: api.AsyncRateLimiter,
     realm_id: int,
     region: str,
 ) -> tuple | None:
@@ -54,7 +55,7 @@ async def _fetch_realm_index(
     """
     path = f'/data/wow/connected-realm/{realm_id}/mythic-leaderboard/index'
     async with sem:
-        data = await api.async_get(client, path, region=region, namespace=f'dynamic-{region}')
+        data = await api.async_get(client, path, region=region, namespace=f'dynamic-{region}', limiter=limiter)
     if not data:
         return None
 
@@ -83,8 +84,9 @@ async def _fetch_realm_index(
 
 async def _fetch_all_realm_indexes(realm_ids: list[int], region: str) -> list[tuple]:
     sem = asyncio.Semaphore(_CONCURRENCY)
+    limiter = api.AsyncRateLimiter()
     async with httpx.AsyncClient(limits=httpx.Limits(max_connections=_CONCURRENCY)) as client:
-        tasks = [_fetch_realm_index(client, sem, rid, region) for rid in realm_ids]
+        tasks = [_fetch_realm_index(client, sem, limiter, rid, region) for rid in realm_ids]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     valid = [r for r in results if isinstance(r, tuple)]
@@ -102,6 +104,7 @@ async def _fetch_all_realm_indexes(realm_ids: list[int], region: str) -> list[tu
 async def _fetch_leaderboard(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
+    limiter: api.AsyncRateLimiter,
     realm_id: int,
     dungeon_id: int,
     dungeon_name: str,
@@ -115,7 +118,7 @@ async def _fetch_leaderboard(
         f'/mythic-leaderboard/{dungeon_id}/period/{period_id}'
     )
     async with sem:
-        data = await api.async_get(client, path, region=region, namespace=f'dynamic-{region}')
+        data = await api.async_get(client, path, region=region, namespace=f'dynamic-{region}', limiter=limiter)
     if not data:
         return []
 
@@ -159,9 +162,10 @@ async def _fetch_all_leaderboards(
     snapshot_date: date,
 ) -> list[dict]:
     sem = asyncio.Semaphore(_CONCURRENCY)
+    limiter = api.AsyncRateLimiter()
     async with httpx.AsyncClient(limits=httpx.Limits(max_connections=_CONCURRENCY)) as client:
         tasks = [
-            _fetch_leaderboard(client, sem, realm_id, dungeon_id, dungeon_name, period_id, region, snapshot_date)
+            _fetch_leaderboard(client, sem, limiter, realm_id, dungeon_id, dungeon_name, period_id, region, snapshot_date)
             for realm_id, dungeon_id, dungeon_name, period_id in tasks_info
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
