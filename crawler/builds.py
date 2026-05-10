@@ -22,7 +22,8 @@ from .config import PROFESSION_STALENESS_DAYS  # reuse same staleness window
 
 logger = logging.getLogger(__name__)
 
-_CONCURRENCY = 20  # conservative to share bandwidth with profession fetches
+_CONCURRENCY = 50  # rate limiter (AsyncRateLimiter) caps throughput at 50 req/s globally;
+                   # high concurrency is needed to sustain that rate on slow-response days.
 
 
 def _filter_to_stale_builds(
