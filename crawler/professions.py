@@ -20,7 +20,9 @@ from .config import PROFESSION_STALENESS_DAYS
 
 logger = logging.getLogger(__name__)
 
-_CONCURRENCY = 20  # lower than profile concurrency to avoid 429s on profession endpoints
+_CONCURRENCY = 50  # rate limiter (AsyncRateLimiter) caps throughput at 50 req/s globally,
+                   # so concurrency only needs to be high enough to keep the pipeline full.
+                   # 50 matches profile concurrency and ensures we always hit the rate ceiling.
 
 
 def _filter_to_stale_professions(
