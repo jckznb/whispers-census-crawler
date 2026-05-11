@@ -4,12 +4,13 @@ name: Mythic+ Crawl (Weekly)
 # giving the M+ leaderboards time to populate with fresh runs.
 # Also triggerable manually from the Actions tab.
 #
-# Split into two jobs so a crawl timeout doesn't prevent aggregation:
-#   crawl    — leaderboard fetch + character resolution (up to 6h)
-#   finalize — aggregate demographics + export blob (up to 2h, always runs)
-#
-# If crawl times out, finalize still runs and exports whatever data
-# made it into Supabase during the partial crawl.
+# Split into 3 jobs so each has an independent 6-hour timeout:
+#   leaderboard — fetch all dungeon leaderboards, store runs+members with
+#                 character stubs. Fast (~15 min).
+#   enrich      — re-fetch leaderboard to get char list, resolve stale
+#                 profiles + professions. Slow (up to 5 hr on cold start;
+#                 fast (<5 min) once the DB is warm from prior runs).
+#   aggregate   — compute demographics snapshots and upload the JSON blob.
 
 on:
   schedule:
@@ -17,15 +18,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  crawl:
-    name: Crawl leaderboards + resolve characters
+  leaderboard:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -33,31 +33,24 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run M+ crawl (no aggregate, no export)
+      - name: Fetch leaderboard data and store runs + character stubs
         env:
           BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
           SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
           BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: |
-          python -m scripts.run_crawl \
-            --phase mplus \
-            --region us \
-            --no-aggregate \
-            --no-export
+        run: python -m scripts.run_crawl --phase mplus --region us --leaderboard-only --no-aggregate --no-export
 
-  finalize:
-    name: Aggregate demographics + export blob
+  enrich:
+    needs: leaderboard
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    needs: crawl
-    if: always()   # run even if crawl was cancelled by timeout
+    timeout-minutes: 330
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5.6.0
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -65,15 +58,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Aggregate M+ demographics snapshot
+      - name: Enrich character profiles and professions
         env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python -m scripts.aggregate --phase mplus --region us
+          BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+        run: python -m scripts.run_crawl --phase mplus --region us --enrich-only --no-aggregate --no-export
 
-      - name: Export demographics blob
+  aggregate:
+    needs: enrich
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compute demographics snapshots and export blob
         env:
-          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
-          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: python -m scripts.export --region us
+          BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+        run: python -m scripts.run_crawl --phase mplus --region us --aggregate-only
