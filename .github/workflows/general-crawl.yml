@@ -1,0 +1,36 @@
+name: General Census (Weekly)
+
+# Runs every Thursday at 14:00 UTC — mid-week, stable roster data,
+# less affected by weekly patch resets than PvP/M+.
+# Fetches guild rosters for all configured realms (~260 calls total),
+# aggregates race × class counts, and writes general_latest.json and
+# general_rp_latest.json to Vercel Blob.
+# Typical runtime: ~5 minutes.
+
+on:
+  schedule:
+    - cron: '0 14 * * 4'
+  workflow_dispatch:
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run general census → Vercel Blob
+        env:
+          BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+        run: python -m scripts.run_crawl --phase general --region us
