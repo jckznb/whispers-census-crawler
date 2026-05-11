@@ -36,14 +36,17 @@ def upsert_char_stubs(chars: list[dict]) -> dict[tuple, int]:
         return {}
 
     now = datetime.now(timezone.utc).isoformat()
+    # Epoch timestamp signals "never enriched" — far enough in the past that the
+    # staleness check (now - 200h) always sees this stub as stale and re-fetches it.
+    # Required: last_api_update is NOT NULL in the DB schema.
+    EPOCH = '1970-01-01T00:00:00+00:00'
     stub_rows = [
         {
-            'name':        c['name'],
-            'realm_slug':  c['realm_slug'],
-            'region':      c['region'],
-            'first_seen':  now,
-            # last_api_update intentionally omitted → stays NULL,
-            # which signals "never enriched" to resolve_characters.
+            'name':             c['name'],
+            'realm_slug':       c['realm_slug'],
+            'region':           c['region'],
+            'first_seen':       now,
+            'last_api_update':  EPOCH,
         }
         for c in chars
     ]
