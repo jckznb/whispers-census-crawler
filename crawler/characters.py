@@ -15,6 +15,71 @@ _CONCURRENCY = 50  # concurrent Blizzard API requests
 # so 300 names ≈ 3600 chars in the URL param, well within limits.
 _NAME_BATCH = 300
 
+# After each chunk of profiles is fetched and upserted, the DB has a durable
+# checkpoint. If a crawl job times out mid-run, the next run finds those
+# characters fresh (< STALENESS_HOURS) and skips them automatically.
+_CHUNK_SIZE = 5_000
+
+
+def upsert_char_stubs(chars: list[dict]) -> dict[tuple, int]:
+    """
+    Insert character stubs (name, realm_slug, region) without overwriting
+    existing profile data. Used by leaderboard-only crawl mode to register
+    new characters before storing run/entry data that references their IDs.
+
+    Uses ignore-duplicates (DO NOTHING on conflict) so existing characters
+    with full profile data are never touched.
+
+    Returns (name, realm_slug, region) → character DB id.
+    """
+    if not chars:
+        return {}
+
+    now = datetime.now(timezone.utc).isoformat()
+    stub_rows = [
+        {
+            'name':        c['name'],
+            'realm_slug':  c['realm_slug'],
+            'region':      c['region'],
+            'first_seen':  now,
+            # last_api_update intentionally omitted → stays NULL,
+            # which signals "never enriched" to resolve_characters.
+        }
+        for c in chars
+    ]
+
+    # ignore-duplicates: existing characters are untouched (profile data preserved)
+    db.upsert(
+        'characters',
+        stub_rows,
+        on_conflict='name,realm_slug,region',
+        conflict_resolution='ignore-duplicates',
+    )
+    logger.info(f'Upserted {len(stub_rows)} character stubs (ignore-duplicates)')
+
+    # Fetch IDs back in name-batched queries (same approach as resolve_characters)
+    by_region: dict[str, list[dict]] = {}
+    for c in chars:
+        by_region.setdefault(c['region'], []).append(c)
+
+    id_map: dict[tuple, int] = {}
+    for region, region_chars in by_region.items():
+        unique_names = list({c['name'] for c in region_chars})
+        for i in range(0, len(unique_names), _NAME_BATCH):
+            batch = unique_names[i:i + _NAME_BATCH]
+            names_csv = ','.join(batch)
+            rows = db.query('characters', {
+                'select': 'id,name,realm_slug,region',
+                'name':   f'in.({names_csv})',
+                'region': f'eq.{region}',
+            })
+            for r in rows:
+                key = (r['name'], r['realm_slug'], r['region'])
+                id_map[key] = r['id']
+
+    logger.info(f'Resolved {len(id_map)}/{len(chars)} character IDs from stubs')
+    return id_map
+
 
 def resolve_characters(
     chars: list[dict],
@@ -24,10 +89,12 @@ def resolve_characters(
     Given a list of {name, realm_slug, region} dicts, return:
       - id_map:     (name, realm_slug, region) -> character DB id
       - fresh_keys: subset of id_map keys that were actually fetched from
-                    the Blizzard API this run (not returned from 24h cache)
+                    the Blizzard API this run (not returned from staleness cache)
 
     Characters updated within STALENESS_HOURS are returned from the DB cache.
-    Others are fetched from the Blizzard API concurrently and upserted.
+    Others are fetched from the Blizzard API concurrently and upserted in
+    chunks of _CHUNK_SIZE — each chunk is committed to the DB immediately so
+    a timeout mid-run still saves partial progress for the next attempt.
 
     force=True bypasses the staleness check and re-fetches all characters.
     Used by census spec resolution to profile census-only characters that have
@@ -85,19 +152,32 @@ def resolve_characters(
     for region in {c['region'] for c in to_fetch}:
         get_token(region)
 
-    fetched_rows = asyncio.run(_fetch_profiles_async(to_fetch))
-    logger.info(f'Fetched {len(fetched_rows)} profiles from API')
-
     fresh_keys: set[tuple] = set()
-    if fetched_rows:
-        db.upsert('characters', fetched_rows, on_conflict='name,realm_slug,region')
-        # Reload only the characters we just fetched — never scan the whole table.
-        by_region_fetch: dict[str, list[dict]] = {}
-        for c in to_fetch:
-            by_region_fetch.setdefault(c['region'], []).append(c)
+    total_chunks = (len(to_fetch) + _CHUNK_SIZE - 1) // _CHUNK_SIZE
 
-        refreshed_rows: list[dict] = []
-        for region, region_chars in by_region_fetch.items():
+    for chunk_idx in range(total_chunks):
+        chunk_start = chunk_idx * _CHUNK_SIZE
+        chunk = to_fetch[chunk_start:chunk_start + _CHUNK_SIZE]
+        logger.info(
+            f'Profile fetch: chunk {chunk_idx + 1}/{total_chunks} '
+            f'({len(chunk)} chars, {chunk_start + len(chunk)}/{len(to_fetch)} total)'
+        )
+
+        fetched_rows = asyncio.run(_fetch_profiles_async(chunk))
+        logger.info(f'Fetched {len(fetched_rows)} profiles in chunk {chunk_idx + 1}')
+
+        if not fetched_rows:
+            continue
+
+        # Upsert this chunk immediately — durable checkpoint even if we time out later
+        db.upsert('characters', fetched_rows, on_conflict='name,realm_slug,region')
+
+        # Reload IDs for only this chunk
+        by_region_chunk: dict[str, list[dict]] = {}
+        for c in chunk:
+            by_region_chunk.setdefault(c['region'], []).append(c)
+
+        for region, region_chars in by_region_chunk.items():
             unique_names = list({c['name'] for c in region_chars})
             for i in range(0, len(unique_names), _NAME_BATCH):
                 batch = unique_names[i:i + _NAME_BATCH]
@@ -107,17 +187,10 @@ def resolve_characters(
                     'name':   f'in.({names_csv})',
                     'region': f'eq.{region}',
                 })
-                refreshed_rows.extend(rows)
-
-        refreshed_map: dict[tuple, int] = {
-            (r['name'], r['realm_slug'], r['region']): r['id']
-            for r in refreshed_rows
-        }
-        for char in to_fetch:
-            key = (char['name'], char['realm_slug'], char['region'])
-            if key in refreshed_map:
-                id_map[key] = refreshed_map[key]
-                fresh_keys.add(key)
+                for r in rows:
+                    key = (r['name'], r['realm_slug'], r['region'])
+                    id_map[key] = r['id']
+                    fresh_keys.add(key)
 
     return id_map, fresh_keys
 
