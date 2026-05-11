@@ -253,30 +253,26 @@ def _store_runs(
 
 
 # ---------------------------------------------------------------------------
-# Main entrypoint
+# Leaderboard fetch helper (shared by all modes)
 # ---------------------------------------------------------------------------
 
-def crawl_mythic_plus(region: str = 'us', snapshot_date: date = None) -> None:
-    if snapshot_date is None:
-        snapshot_date = date.today()
-
-    logger.info(f'Starting M+ crawl: region={region} snapshot_date={snapshot_date}')
-
-    # 1. Connected realm IDs
+def _fetch_leaderboard_data(region: str, snapshot_date: date) -> tuple[list[dict], list[dict]]:
+    """
+    Fetch realm indexes and all dungeon leaderboards.
+    Returns (all_runs, all_chars) where all_chars is the deduplicated list
+    of unique characters found across all runs.
+    """
     realm_ids = get_connected_realm_ids(region)
     if not realm_ids:
         logger.error('No connected realms found — aborting')
-        return
+        return [], []
 
-    # Pre-warm auth token before entering async context
     from .auth import get_token
     get_token(region)
 
-    # 2. Fetch leaderboard indexes for all realms
     logger.info(f'Fetching leaderboard indexes for {len(realm_ids)} realms...')
     realm_indexes = asyncio.run(_fetch_all_realm_indexes(realm_ids, region))
 
-    # 3. Build task list: (realm_id, dungeon_id, dungeon_name, period_id)
     tasks_info = [
         (realm_id, dungeon['id'], dungeon['name'], period_id)
         for realm_id, dungeons, period_id in realm_indexes
@@ -284,15 +280,13 @@ def crawl_mythic_plus(region: str = 'us', snapshot_date: date = None) -> None:
     ]
     logger.info(f'Fetching {len(tasks_info)} dungeon leaderboards...')
 
-    # 4. Fetch all dungeon leaderboards
     all_runs = asyncio.run(_fetch_all_leaderboards(tasks_info, region, snapshot_date))
     logger.info(f'Collected {len(all_runs)} runs across all realms/dungeons')
 
     if not all_runs:
-        logger.warning('No runs fetched — aborting')
-        return
+        return [], []
 
-    # 5. Collect unique characters with their leaderboard-provided race/spec
+    # Deduplicate characters
     all_chars: list[dict] = []
     seen_chars: set[tuple] = set()
     for run in all_runs:
@@ -302,18 +296,82 @@ def crawl_mythic_plus(region: str = 'us', snapshot_date: date = None) -> None:
                 all_chars.append(m)
                 seen_chars.add(key)
 
-    logger.info(f'Resolving {len(all_chars)} unique characters (profile lookups for unknowns)...')
+    logger.info(f'Found {len(all_chars)} unique characters in leaderboard')
+    return all_runs, all_chars
+
+
+# ---------------------------------------------------------------------------
+# Main entrypoint
+# ---------------------------------------------------------------------------
+
+def crawl_mythic_plus(
+    region: str = 'us',
+    snapshot_date: date = None,
+    leaderboard_only: bool = False,
+    enrich_only: bool = False,
+) -> None:
+    """
+    Run the M+ leaderboard crawl.
+
+    leaderboard_only=True:
+        Fetch leaderboard data, upsert character stubs (name/realm/region only,
+        DO NOTHING on conflict), and store runs + members. Skips profile enrichment
+        and profession fetches. Fast (~15 min). Intended to run as a separate GHA
+        job before the enrich job.
+
+    enrich_only=True:
+        Re-fetch the leaderboard (fast, ~30s) to get the current character list,
+        then resolve stale character profiles and professions. Does NOT store
+        runs or members (already done by the leaderboard job). Intended to run
+        as a separate long-running GHA job (up to 330 min timeout).
+
+    Default (both False):
+        Full crawl in one pass: leaderboard fetch → profile resolution →
+        run/member storage → profession fetch.
+    """
+    if snapshot_date is None:
+        snapshot_date = date.today()
+
+    logger.info(
+        f'Starting M+ crawl: region={region} snapshot_date={snapshot_date} '
+        f'leaderboard_only={leaderboard_only} enrich_only={enrich_only}'
+    )
+
+    all_runs, all_chars = _fetch_leaderboard_data(region, snapshot_date)
+    if not all_runs:
+        logger.warning('No runs fetched — aborting')
+        return
+
+    if leaderboard_only:
+        # Insert character stubs so member FK constraints are satisfiable,
+        # then store runs and members using those stub IDs.
+        from .characters import upsert_char_stubs
+        char_id_map = upsert_char_stubs(all_chars)
+        logger.info('Storing runs and members...')
+        _store_runs(all_runs, char_id_map, snapshot_date)
+        logger.info('M+ leaderboard crawl complete — run enrich job separately')
+        return
+
+    if enrich_only:
+        # Runs and members already stored by the leaderboard job.
+        # Resolve stale character profiles and professions only.
+        logger.info(f'Enriching {len(all_chars)} characters (profiles + professions)...')
+        from .characters import resolve_characters
+        char_id_map, fresh_keys = resolve_characters(all_chars)
+        from .professions import resolve_professions
+        resolve_professions(char_id_map, fresh_keys, snapshot_date)
+        logger.info('M+ enrich complete')
+        return
+
+    # Normal mode: full crawl in one pass
+    logger.info(f'Resolving {len(all_chars)} unique characters (profile lookups for stale)...')
     from .characters import resolve_characters
     char_id_map, fresh_keys = resolve_characters(all_chars)
 
-    # 6. Persist
     logger.info('Storing runs and members...')
     _store_runs(all_runs, char_id_map, snapshot_date)
 
-    # 7. Fetch professions + builds for characters freshly pulled from the API
     from .professions import resolve_professions
-    from .builds import resolve_builds
     resolve_professions(char_id_map, fresh_keys, snapshot_date)
-    resolve_builds(char_id_map, fresh_keys, snapshot_date)
 
     logger.info('M+ crawl complete')
