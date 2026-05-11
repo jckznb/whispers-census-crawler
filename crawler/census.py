@@ -85,13 +85,17 @@ def seed_guilds(region: str) -> int:
         f'(region={region})...'
     )
 
-    # Pull distinct (guild_name, guild_realm_slug) from target realms only
+    # Pull distinct (guild_name, guild_realm_slug) from target realms only.
+    # Cap at 200k rows — the characters table grows unboundedly but we only need
+    # enough rows to discover all guilds. Capping prevents a statement timeout
+    # in Supabase when the table exceeds ~750k rows with high-offset pagination.
     slugs_csv = ','.join(target_slugs)
     rows = db.query('characters', {
         'select':             'guild_name,guild_realm_slug',
         'region':             f'eq.{region}',
         'guild_name':         'not.is.null',
         'guild_realm_slug':   f'in.({slugs_csv})',
+        'limit':              '200000',
     })
 
     if not rows:
