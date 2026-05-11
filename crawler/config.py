@@ -25,9 +25,13 @@ BLIZZARD_API_BASE = {
 RATE_LIMIT_RPS = 50
 
 # Skip character profile lookups if updated more recently than this.
-# 48h (2 days) ensures M+ crawl (Wednesday) benefits from PvP cache (Tuesday)
-# without requiring a full re-fetch of every character every week.
-STALENESS_HOURS = 48
+# 200h (≈8.3 days) is intentionally longer than the weekly crawl interval (168h).
+# After a successful cold-start enrich, characters fetched last week are still
+# "fresh" this week — so ongoing weekly runs only fetch genuinely new characters.
+# The PvP-cache-for-M+ benefit is preserved: PvP (Tuesday) and M+ (Wednesday)
+# both share the same staleness window, so chars fetched by PvP are still fresh
+# when M+ runs ~24h later.
+STALENESS_HOURS = 200
 
 # Targeted realms for the general population census.
 # Two clusters chosen for distinct community character:
