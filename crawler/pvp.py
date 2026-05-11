@@ -1,20 +1,48 @@
-"""Phase 1: PvP leaderboard crawler."""
+"""
+PvP spec/race/class distribution crawler.
+
+Fetches all 85 bracket leaderboards for the current PvP season, deduplicates
+characters across brackets, then fetches a character profile for each unique
+character to get race_id, class_id, and active_spec_id.
+
+Aggregates counts and writes pvp_latest.json to Vercel Blob.
+
+Output blob shape:
+{
+  "updated":      "2026-05-11",
+  "season":       41,
+  "total":        78432,
+  "by_spec":      { "65": 4821, ... },   # spec_id  → count
+  "by_class":     { "2":  14200, ... },  # class_id → count
+  "by_race":      { "10": 18400, ... },  # race_id  → count
+  "by_race_spec": { "10_65": 1200, ... },
+  "by_race_class":{ "10_2": 3800, ... }
+}
+"""
+import asyncio
 import logging
 from datetime import date
+import httpx
 from . import client as api
-from . import db
+from . import blob as blob_store
 
 logger = logging.getLogger(__name__)
 
+_CONCURRENCY = 50   # profile fetches — same as rate limiter ceiling
 
-def get_current_season(region: str = 'us') -> int:
+
+# ---------------------------------------------------------------------------
+# Leaderboard fetch (synchronous — 85 sequential calls, fast enough)
+# ---------------------------------------------------------------------------
+
+def _get_current_season(region: str) -> int:
     data = api.get('/data/wow/pvp-season/index', region=region, namespace=f'dynamic-{region}')
     if not data:
         raise RuntimeError(f'Could not fetch PvP season index for region={region}')
     return data['current_season']['id']
 
 
-def get_brackets(season_id: int, region: str = 'us') -> list[str]:
+def _get_brackets(season_id: int, region: str) -> list[str]:
     data = api.get(
         f'/data/wow/pvp-season/{season_id}/pvp-leaderboard/index',
         region=region,
@@ -25,7 +53,8 @@ def get_brackets(season_id: int, region: str = 'us') -> list[str]:
     return [lb['name'] for lb in data.get('leaderboards', []) if lb.get('name')]
 
 
-def fetch_leaderboard(season_id: int, bracket: str, region: str = 'us') -> list[dict]:
+def _fetch_bracket(season_id: int, bracket: str, region: str) -> list[tuple[str, str]]:
+    """Returns list of (name, realm_slug) entries from one bracket."""
     data = api.get(
         f'/data/wow/pvp-season/{season_id}/pvp-leaderboard/{bracket}',
         region=region,
@@ -39,144 +68,157 @@ def fetch_leaderboard(season_id: int, bracket: str, region: str = 'us') -> list[
         char = entry.get('character', {})
         name = char.get('name')
         realm_slug = char.get('realm', {}).get('slug')
-        if not name or not realm_slug:
-            continue
-        entries.append({
-            'name': name,
-            'realm_slug': realm_slug,
-            'region': region,
-            'rating': entry.get('rating', 0),
-            'rank': entry.get('rank'),
-            'bracket': bracket,
-            'season_id': season_id,
-        })
-
-    logger.info(f'Fetched {len(entries)} entries for bracket={bracket} region={region}')
+        if name and realm_slug:
+            entries.append((name, realm_slug))
+    logger.info(f'  {bracket}: {len(entries)} entries')
     return entries
 
 
-def _fetch_all_entries(region: str) -> tuple[int, list[dict]]:
-    """Fetch all leaderboard entries across all brackets. Returns (season_id, entries)."""
-    season_id = get_current_season(region)
-    logger.info(f'PvP season={season_id} region={region}')
+# ---------------------------------------------------------------------------
+# Async character profile fetch
+# ---------------------------------------------------------------------------
 
-    brackets = get_brackets(season_id, region)
-    logger.info(f'Found {len(brackets)} brackets: {brackets}')
+async def _fetch_profile(
+    client: httpx.AsyncClient,
+    sem: asyncio.Semaphore,
+    limiter: api.AsyncRateLimiter,
+    name: str,
+    realm_slug: str,
+    region: str,
+) -> dict | None:
+    """Returns {name, realm_slug, race_id, class_id, spec_id} or None on error."""
+    async with sem:
+        data = await api.async_get(
+            client,
+            f'/profile/wow/character/{realm_slug}/{name.lower()}',
+            region=region,
+            namespace=f'profile-{region}',
+            limiter=limiter,
+        )
+    if not data:
+        return None
 
-    all_entries: list[dict] = []
-    for bracket in brackets:
-        entries = fetch_leaderboard(season_id, bracket, region)
-        all_entries.extend(entries)
-
-    return season_id, all_entries
-
-
-def _store_pvp_entries(
-    all_entries: list[dict],
-    char_id_map: dict[tuple, int],
-    season_id: int,
-    snapshot_date: date,
-) -> None:
-    """Deduplicate on (character_id, bracket), keeping highest rating, then upsert."""
-    pvp_dedup: dict[tuple, dict] = {}
-    for entry in all_entries:
-        key = (entry['name'], entry['realm_slug'], entry['region'])
-        char_id = char_id_map.get(key)
-        if char_id is None:
-            continue
-        dedup_key = (char_id, entry['season_id'], entry['bracket'], snapshot_date.isoformat())
-        row = {
-            'character_id': char_id,
-            'season_id':    entry['season_id'],
-            'bracket':      entry['bracket'],
-            'rating':       entry['rating'],
-            'rank':         entry['rank'],
-            'snapshot_date': snapshot_date.isoformat(),
-        }
-        existing = pvp_dedup.get(dedup_key)
-        if existing is None or row['rating'] > existing['rating']:
-            pvp_dedup[dedup_key] = row
-
-    pvp_rows = list(pvp_dedup.values())
-    db.upsert('pvp_entries', pvp_rows, on_conflict='character_id,season_id,bracket,snapshot_date')
-    logger.info(f'Stored {len(pvp_rows)} PvP entries for snapshot={snapshot_date}')
+    return {
+        'name':       name,
+        'realm_slug': realm_slug,
+        'race_id':    data.get('race', {}).get('id'),
+        'class_id':   data.get('character_class', {}).get('id'),
+        'spec_id':    data.get('active_spec', {}).get('id'),
+    }
 
 
-def crawl_pvp(
-    region: str = 'us',
-    snapshot_date: date = None,
-    leaderboard_only: bool = False,
-    enrich_only: bool = False,
-) -> None:
+async def _fetch_profiles_async(
+    chars: list[tuple[str, str]],
+    region: str,
+) -> list[dict]:
+    """Fetch profiles for all (name, realm_slug) pairs concurrently."""
+    sem = asyncio.Semaphore(_CONCURRENCY)
+    limiter = api.AsyncRateLimiter()
+    async with httpx.AsyncClient(limits=httpx.Limits(max_connections=_CONCURRENCY)) as client:
+        tasks = [
+            _fetch_profile(client, sem, limiter, name, realm_slug, region)
+            for name, realm_slug in chars
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    errors = sum(1 for r in results if isinstance(r, Exception))
+    if errors:
+        logger.warning(f'{errors} profile fetches failed — skipping those characters')
+    return [r for r in results if isinstance(r, dict)]
+
+
+# ---------------------------------------------------------------------------
+# Main entrypoint
+# ---------------------------------------------------------------------------
+
+def crawl_pvp(region: str = 'us', snapshot_date: date = None) -> None:
     """
-    Run the PvP leaderboard crawl.
-
-    leaderboard_only=True:
-        Fetch all bracket leaderboards, upsert character stubs (name/realm/region
-        only, DO NOTHING on conflict), and store pvp_entries. Skips profile
-        enrichment and profession fetches. Fast (~5 min). Intended to run as a
-        separate GHA job before the enrich job.
-
-    enrich_only=True:
-        Re-fetch the leaderboards (fast, ~85 requests) to get the current character
-        list, then resolve stale character profiles and professions. Does NOT store
-        pvp_entries (already done by the leaderboard job). Intended to run as a
-        separate long-running GHA job (up to 330 min timeout).
-
-    Default (both False):
-        Full crawl in one pass: leaderboard fetch → profile resolution →
-        pvp_entry storage → profession fetch.
+    Fetch all PvP bracket leaderboards, dedup characters across brackets,
+    fetch a profile for each unique character, aggregate race/class/spec
+    counts, and write pvp_latest.json to Vercel Blob.
     """
-    from .characters import resolve_characters, upsert_char_stubs
-
     if snapshot_date is None:
         snapshot_date = date.today()
 
+    logger.info(f'Starting PvP crawl: region={region} date={snapshot_date}')
+
+    season_id = _get_current_season(region)
+    logger.info(f'Season: {season_id}')
+
+    brackets = _get_brackets(season_id, region)
+    logger.info(f'Fetching {len(brackets)} brackets...')
+
+    # Collect all (name, realm_slug) entries across all brackets
+    seen: set[tuple[str, str]] = set()
+    for bracket in brackets:
+        for entry in _fetch_bracket(season_id, bracket, region):
+            seen.add(entry)
+
+    unique_chars = list(seen)
+    logger.info(f'{len(unique_chars)} unique characters across all brackets')
+
+    if not unique_chars:
+        logger.warning('No characters found — aborting')
+        return
+
+    # Pre-warm token before async context
+    from .auth import get_token
+    get_token(region)
+
+    logger.info(f'Fetching {len(unique_chars)} character profiles...')
+    profiles = asyncio.run(_fetch_profiles_async(unique_chars, region))
+    logger.info(f'Fetched {len(profiles)} profiles successfully')
+
+    if not profiles:
+        logger.warning('No profiles returned — aborting')
+        return
+
+    # Aggregate counts
+    by_spec:       dict[str, int] = {}
+    by_class:      dict[str, int] = {}
+    by_race:       dict[str, int] = {}
+    by_race_spec:  dict[str, int] = {}
+    by_race_class: dict[str, int] = {}
+
+    for p in profiles:
+        spec_id  = p.get('spec_id')
+        class_id = p.get('class_id')
+        race_id  = p.get('race_id')
+
+        if spec_id is not None:
+            k = str(spec_id)
+            by_spec[k] = by_spec.get(k, 0) + 1
+
+        if class_id is not None:
+            k = str(class_id)
+            by_class[k] = by_class.get(k, 0) + 1
+
+        if race_id is not None:
+            k = str(race_id)
+            by_race[k] = by_race.get(k, 0) + 1
+
+        if race_id is not None and spec_id is not None:
+            k = f'{race_id}_{spec_id}'
+            by_race_spec[k] = by_race_spec.get(k, 0) + 1
+
+        if race_id is not None and class_id is not None:
+            k = f'{race_id}_{class_id}'
+            by_race_class[k] = by_race_class.get(k, 0) + 1
+
+    payload = {
+        'updated':       snapshot_date.isoformat(),
+        'season':        season_id,
+        'total':         len(profiles),
+        'by_spec':       by_spec,
+        'by_class':      by_class,
+        'by_race':       by_race,
+        'by_race_spec':  by_race_spec,
+        'by_race_class': by_race_class,
+    }
+
     logger.info(
-        f'Starting PvP crawl: region={region} snapshot_date={snapshot_date} '
-        f'leaderboard_only={leaderboard_only} enrich_only={enrich_only}'
+        f'Writing PvP blob: {len(profiles):,} chars, '
+        f'{len(by_spec)} specs, {len(by_race)} races'
     )
-
-    season_id, all_entries = _fetch_all_entries(region)
-
-    if not all_entries:
-        logger.warning('No PvP entries fetched — aborting')
-        return
-
-    # Deduplicate characters from the raw entry list
-    seen: dict[tuple, dict] = {}
-    for entry in all_entries:
-        key = (entry['name'], entry['realm_slug'], entry['region'])
-        if key not in seen:
-            seen[key] = {'name': entry['name'], 'realm_slug': entry['realm_slug'], 'region': entry['region']}
-
-    unique_chars = list(seen.values())
-    logger.info(f'Found {len(unique_chars)} unique characters in leaderboard')
-
-    if leaderboard_only:
-        # Upsert character stubs so pvp_entries FK is satisfiable, then store entries.
-        char_id_map = upsert_char_stubs(unique_chars)
-        _store_pvp_entries(all_entries, char_id_map, season_id, snapshot_date)
-        logger.info('PvP leaderboard crawl complete — run enrich job separately')
-        return
-
-    if enrich_only:
-        # PvP entries already stored by the leaderboard job.
-        # Resolve stale character profiles and professions only.
-        logger.info(f'Enriching {len(unique_chars)} characters (profiles + professions)...')
-        char_id_map, fresh_keys = resolve_characters(unique_chars)
-        from .professions import resolve_professions
-        resolve_professions(char_id_map, fresh_keys, snapshot_date)
-        logger.info('PvP enrich complete')
-        return
-
-    # Normal mode: full crawl in one pass
-    logger.info(f'Resolving {len(unique_chars)} unique characters')
-    char_id_map, fresh_keys = resolve_characters(unique_chars)
-
-    _store_pvp_entries(all_entries, char_id_map, season_id, snapshot_date)
-
-    from .professions import resolve_professions
-    resolve_professions(char_id_map, fresh_keys, snapshot_date)
-
+    blob_store.write('pvp', payload, snapshot_date)
     logger.info('PvP crawl complete')
