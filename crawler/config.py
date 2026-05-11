@@ -3,80 +3,155 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Optional at import time — only required when making Blizzard API calls.
-# Using .get() so aggregate/export jobs can import config without Blizzard creds.
-BLIZZARD_CLIENT_ID = os.environ.get('BLIZZARD_CLIENT_ID', '')
+BLIZZARD_CLIENT_ID     = os.environ.get('BLIZZARD_CLIENT_ID', '')
 BLIZZARD_CLIENT_SECRET = os.environ.get('BLIZZARD_CLIENT_SECRET', '')
-
-SUPABASE_URL = os.environ['SUPABASE_URL']
-SUPABASE_SERVICE_KEY = os.environ['SUPABASE_SERVICE_KEY']
-
-BLOB_READ_WRITE_TOKEN = os.environ.get('BLOB_READ_WRITE_TOKEN', '')
-
-REGIONS = ['us']  # Add 'eu' in Phase 2
+BLOB_READ_WRITE_TOKEN  = os.environ.get('BLOB_READ_WRITE_TOKEN', '')
 
 BLIZZARD_TOKEN_URL = 'https://oauth.battle.net/token'
-BLIZZARD_API_BASE = {
+BLIZZARD_API_BASE  = {
     'us': 'https://us.api.blizzard.com',
     'eu': 'https://eu.api.blizzard.com',
 }
 
-# Stay safely under 100 req/s Blizzard rate limit
+# Stay safely under the 100 req/s Blizzard rate limit
 RATE_LIMIT_RPS = 50
 
-# Skip character profile lookups if updated more recently than this.
-# 200h (≈8.3 days) is intentionally longer than the weekly crawl interval (168h).
-# After a successful cold-start enrich, characters fetched last week are still
-# "fresh" this week — so ongoing weekly runs only fetch genuinely new characters.
-# The PvP-cache-for-M+ benefit is preserved: PvP (Tuesday) and M+ (Wednesday)
-# both share the same staleness window, so chars fetched by PvP are still fresh
-# when M+ runs ~24h later.
-STALENESS_HOURS = 200
-
-# Targeted realms for the general population census.
-# Two clusters chosen for distinct community character:
+# ---------------------------------------------------------------------------
+# General census guild configuration
 #
-#   rp      — dedicated RP servers; skews toward casual/social playstyle
-#               Moon Guard, Wyrmrest Accord, Emerald Dream
+# Store display names exactly as they appear in-game. The crawler slugifies
+# them at runtime for the API endpoint URL. Realm keys must match Blizzard's
+# realm slug format exactly.
 #
-#   general — the ten highest-population US realms; broad cross-section
-#               of the active playerbase weighted toward Horde (Area 52,
-#               Illidan, Mal'Ganis dominate US pop rankings)
-#               Illidan, Area 52, Mal'Ganis, Zul'jin, Tichondrius,
-#               Stormrage, Thrall, Ragnaros, Azralon
-#               + one TBD slot (see FIXME below)
-#
-# Slugs must match the Blizzard API realm slug format exactly.
-# Verify unknown slugs via: GET /data/wow/realm/{slug}?namespace=dynamic-us
-CENSUS_TARGET_REALMS: dict[str, list[str]] = {
-    'rp': [
-        'moon-guard',
-        'wyrmrest-accord',
-        'emerald-dream',
+# High-population realms (combined into general_latest.json)
+# ---------------------------------------------------------------------------
+GENERAL_GUILDS: dict[str, list[str]] = {
+    'area-52': [
+        'xD',
+        'Infinity',
+        'Idiot',
+        'Vesper',
+        'Twitch Prime',
+        'Muscle Memory',
+        'Unorganized',
+        'YEP',
+        'Stupid Fat Hobbits',
+        'now watch this drive',
     ],
-    'general': [
-        'illidan',
-        'area-52',
-        'malganis',    # Mal'Ganis
-        'zuljin',      # Zul'jin
-        'tichondrius',
-        'stormrage',
-        'sargeras',    # Sargeras
-        'thrall',
-        'ragnaros',    # Latin America
-        'azralon',     # Latin America
+    'stormrage': [
+        'Consequence',
+        'SOMA',
+        'Hollow Purple',
+        'Parallax Gaming',
+        'Slurp Squad',
+        'Commit',
+        'Chaotic Aftermath',
+        'Remnants of Shadow',
+        'Efficient',
+        'The Meme Team',
+    ],
+    'illidan': [
+        'Liquid',
+        'velocity',
+        'DMG',
+        'Melee Mechanics',
+        'Country Club',
+        'Vibrant',
+        'Style',
+        'Warpath',
+        'Squirrel Squad',
+        'Just Woke Up',
+    ],
+    'zuljin': [
+        'Refined',
+        'vodka',
+        'Might',
+        'ohno',
+        'Room Forty',
+        'Tempo',
+        'Reforged',
+        'Bound',
+        'FwF',
+        'Children',
+    ],
+    'malganis': [
+        'Instant Dollars',
+        'gn',
+        'nVus',
+        'Pathogen',
+        'Void',
+        'slurp',
+        'Calm Down',
+        'Stormbound',
+        'just sit me',
+        'Decidedly Uncouth',
+    ],
+    'tichondrius': [
+        'poptart corndoG',
+        'Incarnate',
+        'Nurfed',
+        'Blur',
+        'Unbalanced',
+        'Defenstrate',
+        'Nerd Rage',
+        'Tab Target',
+        'Snowblind',
+        'Review The Data',
+    ],
+    'thrall': [
+        'Literacy Test',
+        'JGGBT',
+        'Speakeasy',
+        'Do Over',
+        'SDS',
+        'Notion',
+        'Unrivaled',
+        'Stoic',
+        'The Silent Circle',
+        'Definitely Skoot',
+    ],
+    'ragnaros': [
+        'Ascended',
+        'Southern Sea',
+        'Finesse',
+        'INSANO',
+        'Pineapple',
+        'No Simps',
+        'Essentials',
+        'Los Mercenarios',
+        'Ethereal',
+        'The Burning Seagull',
+    ],
+    'sargeras': [
+        'Humble',
+        'comma',
+        'Vulgar',
+        'No Skill',
+        'Business Class',
+        'The Family Business',
+        'Monkey Mash',
+        'Skill Issue',
+        'Mid',
+        'Hello Kitty Club',
+    ],
+    'proudmoore': [
+        'TRK',
+        'Availed',
+        'Only Raiders',
+        'Seer',
+        'Valkyrie',
+        'Primarch',
+        'Pull On Two',
+        'Eternal Kingdom',
+        'Game OVer',
+        'Retirement',
     ],
 }
 
-# Manual guild seeds for realms that are underrepresented in PvP/M+ leaderboards.
-# RP realms in particular have large active populations but few rated players,
-# so the character-based seed produces almost nothing for them.
-#
-# Add well-known large guilds here — the roster crawl will fan out from these
-# into hundreds of additional guilds via the guild_name field on discovered chars.
-#
-# Guild names must match the in-game name exactly (slugification is automatic).
-MANUAL_GUILD_SEEDS: dict[str, list[str]] = {
+# ---------------------------------------------------------------------------
+# RP realms (combined into general_rp_latest.json)
+# ---------------------------------------------------------------------------
+RP_GUILDS: dict[str, list[str]] = {
     'moon-guard': [
         'Edict',
         'vibes',
@@ -144,9 +219,3 @@ MANUAL_GUILD_SEEDS: dict[str, list[str]] = {
         'Clickers Anonymous',
     ],
 }
-
-# Skip profession re-fetches for characters that already have a profession
-# snapshot within this many days. Profession choices are stable mid-season,
-# so weekly is fine. This prevents re-fetching ~150k profession endpoints
-# every time the crawler runs (since all characters are always profile-stale).
-PROFESSION_STALENESS_DAYS = 7
