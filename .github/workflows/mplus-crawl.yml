@@ -1,24 +1,17 @@
 name: Mythic+ Crawl (Weekly)
 
-# Runs every Wednesday at 16:00 UTC — one day after the NA weekly reset,
-# giving the M+ leaderboards time to populate with fresh runs.
-# Also triggerable manually from the Actions tab.
-#
-# Split into 3 jobs so each has an independent 6-hour timeout:
-#   leaderboard — fetch all dungeon leaderboards, store runs+members with
-#                 character stubs. Fast (~15 min).
-#   enrich      — re-fetch leaderboard to get char list, resolve stale
-#                 profiles + professions. Slow (up to 5 hr on cold start;
-#                 fast (<5 min) once the DB is warm from prior runs).
-#   aggregate   — compute demographics snapshots and upload the JSON blob.
+# Runs every Monday at 14:30 UTC — alongside PvP crawl, staggered 30 min.
+# Fetches all dungeon leaderboards and extracts spec_id directly from the
+# response — no character profile calls. Writes mplus_latest.json to Vercel Blob.
+# Typical runtime: ~5 minutes.
 
 on:
   schedule:
-    - cron: '0 16 * * 3'
+    - cron: '30 14 * * 1'
   workflow_dispatch:
 
 jobs:
-  leaderboard:
+  crawl:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -33,61 +26,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Fetch leaderboard data and store runs + character stubs
+      - name: Run M+ crawl → Vercel Blob
         env:
           BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
-          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
           BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: python -m scripts.run_crawl --phase mplus --region us --leaderboard-only --no-aggregate --no-export
-
-  enrich:
-    needs: leaderboard
-    runs-on: ubuntu-latest
-    timeout-minutes: 330
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Enrich character profiles and professions
-        env:
-          BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
-          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
-          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
-          BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: python -m scripts.run_crawl --phase mplus --region us --enrich-only --no-aggregate --no-export
-
-  aggregate:
-    needs: enrich
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Compute demographics snapshots and export blob
-        env:
-          BLIZZARD_CLIENT_ID:     ${{ secrets.BLIZZARD_CLIENT_ID }}
-          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
-          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
-          BLOB_READ_WRITE_TOKEN:  ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-        run: python -m scripts.run_crawl --phase mplus --region us --aggregate-only
+        run: python -m scripts.run_crawl --phase mplus --region us
